@@ -1,0 +1,327 @@
+# Current State
+
+## Product
+Accessibility Scan Manager MVP
+
+## Confirmed Architecture
+- External Node.js scanner service
+- WordPress plugin for admin UI and persistence
+- Action Scheduler for polling/orchestration
+- Static shared API key between WordPress and scanner
+
+## Files
+- docs/SPEC.md
+- docs/PROJECT_CONTEXT.md
+
+## Completed
+- Initial spec created
+- Context file created
+- Project created in ChatGPT
+- VS Code scaffold for scanner Phase 1 started
+- Codex audited and aligned Phase 1 implementation
+- Phase 1 scanner verification completed:
+  - `npm install` succeeded
+  - `npx playwright install` succeeded
+  - `npm run build` succeeded
+  - `npm run dev` succeeded
+  - `POST /scan` verified for:
+    - one valid public URL
+    - missing URL
+    - invalid URL
+- Phase 2 manual scan job slice implemented:
+  - in-memory scan jobs
+  - job creation with one URL or a manual URL list
+  - job status polling
+  - results retrieval through existing job endpoints
+- Phase 2 manual multi-URL runtime verification completed:
+  - `npm run build` succeeded
+  - `npm run dev` succeeded
+  - multi-URL success case verified
+  - WordPress test URL verified: `https://webtecsinc80.sg-host.com`
+  - invalid URL in submitted list returns a clear `400` validation error
+- Phase 2 sitemap scan slice implemented:
+  - sitemap-based job creation through existing in-memory job flow
+  - standard XML sitemap parsing
+  - sitemap index parsing
+  - discovered sitemap URLs scanned through existing per-URL scan logic
+- Phase 2 sitemap runtime verification completed:
+  - `npm run build` succeeded
+  - `npm run dev` succeeded
+  - sitemap mode verified with `https://webtecsinc80.sg-host.com/wp-sitemap.xml`
+  - sitemap job completed successfully and returned discovered URLs/results
+  - invalid sitemap input returns a clear `400` validation error
+- Phase 3 WordPress plugin data-layer slice implemented in `/wordpress-plugin`:
+  - plugin scaffold created
+  - activation hook added
+  - custom tables added:
+    - `wp_acc_sites`
+    - `wp_acc_scans`
+    - `wp_acc_scan_urls`
+    - `wp_acc_violations`
+  - required indexes from the spec added
+  - DB version option and upgrade check added
+  - small explicit DB helper added for sites, scans, scan URLs, violations, and workflow updates
+- Phase 3 WordPress plugin data-layer verification completed in a real Local WordPress environment:
+  - plugin activation verified successfully
+  - `acc_db_version` option verified
+  - custom table creation verified
+  - required indexes verified
+  - helper save/retrieve behavior verified for sites, scans, and violations
+  - small correction made during verification: added scan and violation retrieval methods to the DB helper
+  - existing Phase 3 schema remains in place under the MVP single-site-per-install interpretation, where `wp_acc_sites` may contain the current install's local site record
+- Phase 4 smallest admin UI slice implemented in `/wordpress-plugin`:
+  - top-level wp-admin menu added: `Accessibility Scans`
+  - single Site Settings screen added for the current install
+  - site settings form saves:
+    - site name
+    - base URL
+    - optional sitemap URL
+    - active flag
+  - screen uses the existing `wp_acc_sites` table under the single-site-per-install model
+  - if no local site record exists, the admin screen creates one with default local site values and then loads it
+  - capability checks, nonce validation, sanitization, and escaping added for this slice
+  - small read-only local summary block added using existing local DB counts for scans, scanned URLs, violations, and last scan start time
+- Phase 4 next smallest admin UI slice implemented in `/wordpress-plugin`:
+  - `Scan Jobs` submenu page added under `Accessibility Scans`
+  - read-only scan jobs table added for the current install only
+  - table columns added:
+    - status
+    - mode
+    - started
+    - finished
+    - URL count
+    - violation count
+  - clear empty state added when no local scan jobs exist yet
+  - small explicit DB helper added to list local scan jobs with per-scan URL and violation counts
+  - no scanner integration, scheduling, trigger actions, or violations UI added in this slice
+- Phase 4 next smallest admin UI slice implemented in `/wordpress-plugin`:
+  - `Violations` submenu page added under `Accessibility Scans`
+  - read-only violations summary table added for the current install only
+  - table columns added:
+    - rule
+    - impact
+    - page count
+    - occurrence count
+    - last seen
+  - violation rows grouped into a compact summary by rule and impact
+  - clear empty state added when no local violations exist yet
+  - small explicit DB helper added to list local violation summaries
+  - no violation detail screen, workflow actions, filtering, pagination, or scanner integration added in this slice
+- Phase 4 next smallest admin UI slice implemented in `/wordpress-plugin`:
+  - read-only Violation Detail view added within the `Violations` admin screen flow for the current install only
+  - violations summary rows now include a clear `View` action
+  - grouped violation detail view shows:
+    - rule ID
+    - impact
+    - total occurrence count
+    - affected page count
+    - last seen
+    - stored description/help/help URL when available
+    - example selectors and HTML snippet when available
+    - affected page list with per-page occurrence counts
+  - clear invalid/not-found states added for missing or unknown grouped violations
+  - small explicit DB helpers added to load one local grouped violation summary and its affected pages
+  - no workflow editing, notes UI, filtering, pagination, or scanner integration added in this slice
+- Phase 4 next smallest admin UI slice implemented in `/wordpress-plugin`:
+  - read-only Scan Detail view added within the `Scan Jobs` admin screen flow for the current install only
+  - scan job rows now include a clear `View` action
+  - scan detail view shows:
+    - scan ID
+    - status
+    - mode
+    - started
+    - finished
+    - total URL count
+    - total violation count
+    - stored error message when available
+    - scanned URL list with per-URL HTTP status, scanned timestamp, and violation count
+  - clear invalid/not-found states added for missing or unknown scans
+  - small explicit DB helpers added to load one local scan and its related scanned URLs
+  - no scanner integration, polling, remote API integration, or scan-trigger actions added in this slice
+- Phase 5 smallest foundation slice implemented across `/wordpress-plugin` and `/scanner-service`:
+  - WordPress scanner connection settings added on the existing `Accessibility Scans` top-level settings screen:
+    - scanner service base URL
+    - shared API key
+  - shared API key field supports config-backed use through the `ACC_SCANNER_API_KEY` constant
+  - small explicit WordPress scanner HTTP helper added for authenticated requests using the configured base URL and API key
+  - scanner service protected scan job endpoints added:
+    - `POST /api/scans`
+    - `GET /api/scans/:jobId`
+    - `GET /api/scans/:jobId/results`
+  - scanner service now validates the shared API key from:
+    - `Authorization: Bearer <key>`
+    - `X-ACC-API-Key: <key>`
+  - missing or invalid scanner keys now return a clear `401` JSON error on protected endpoints
+  - no scan-trigger UI, scheduling, polling, ingestion, or rescan comparison added in this slice
+- Phase 5 next smallest submission slice implemented in `/wordpress-plugin`:
+  - minimal scan trigger UI added to the existing `Scan Jobs` screen
+  - supported scan modes added:
+    - sitemap mode using the saved local sitemap URL
+    - manual URL list mode using one URL per line
+  - local scan records are now created before remote submission
+  - local scan records now store the remote scanner job ID for later polling work
+  - successful submissions update the local scan to the remote queued status and preserve the returned remote job ID
+  - failed submissions update the local scan with a failed status and stored error message
+  - read-only Scan Detail now shows the stored remote job ID when available
+  - no polling, result fetching, ingestion, or rescan comparison added in this slice
+- Phase 5 next smallest manual status refresh slice implemented in `/wordpress-plugin`:
+  - small manual `Refresh Status` action added to the Scan Detail view for scans with a stored `remote_job_id`
+  - WordPress can now call the protected scanner status endpoint:
+    - `GET /api/scans/:jobId`
+  - existing authenticated scanner request layer is reused for the status request
+  - remote status payloads are parsed conservatively and malformed responses return `WP_Error`
+  - local scan rows now update from remote status refresh for:
+    - `queued`
+    - `running`
+    - `completed`
+    - `failed`
+  - local `finished_at` is set when a remote scan reaches `completed` or `failed`
+  - local `error_message` is updated from remote `error` and per-URL `failures` when provided by the scanner service
+  - no Action Scheduler, automatic polling, result fetching, scan URL ingestion, violation ingestion, or rescan comparison added in this slice
+- Phase 5 next smallest manual result ingestion slice implemented in `/wordpress-plugin`:
+  - small manual `Fetch Results` action added to the Scan Detail view
+  - the action is shown only when the local scan:
+    - has a stored `remote_job_id`
+    - has local status `completed`
+  - WordPress can now call the protected scanner results endpoint:
+    - `GET /api/scans/:jobId/results`
+  - existing authenticated scanner request layer is reused for the results request
+  - remote results payloads are validated conservatively and malformed responses return `WP_Error`
+  - completed remote results are manually ingested into existing local tables:
+    - one `scan_urls` row per result URL
+    - one `violations` row per affected element occurrence
+  - local ingestion maps:
+    - result URL
+    - normalized URL
+    - HTTP status
+    - derived scanned timestamp
+    - rule ID
+    - impact
+    - help/help URL
+    - description
+    - HTML snippet
+    - selector target JSON
+    - fingerprint
+  - repeated manual fetches now replace previously ingested rows for that same scan to avoid duplicate inflation
+  - local `error_message` is updated when remote fetch or local ingestion fails, and may retain remote per-URL failure notes for completed scans with partial failures
+  - no Action Scheduler, automatic polling, background jobs, rescan comparison, workflow editing, filtering, or pagination added in this slice
+- Phase 5 next smallest automatic polling slice implemented in `/wordpress-plugin`:
+  - small explicit scan orchestration helper added for shared scan polling and ingestion behavior
+  - successful scan submissions now schedule one Action Scheduler polling action for that scan
+  - duplicate pending polling actions are avoided per scan while the job is active
+  - scheduled polling now:
+    - loads the local scan
+    - checks the remote scanner job status
+    - updates the local scan status, finished time, and error message
+    - schedules the next poll when the remote job remains `queued` or `running`
+    - automatically fetches and ingests results when the remote job reaches `completed`
+    - stores failed remote scan state and stops when the remote job reaches `failed`
+  - existing manual `Refresh Status` and `Fetch Results` admin actions now reuse the same shared status-sync and ingestion path
+  - if Action Scheduler is unavailable, the scan submission still succeeds but the scan detail view now shows a warning that automatic polling could not be scheduled
+  - no rescan comparison, cross-scan dedupe/resolution, workflow editing, filtering, pagination, or scanner-service schema changes added in this slice
+- Next smallest admin-usability workflow editing slice implemented in `/wordpress-plugin`:
+  - the existing grouped `Violation Detail` view now includes an `Occurrences` table for individual stored violation rows
+  - each occurrence row now shows:
+    - violation ID
+    - page URL
+    - first seen
+    - last seen
+    - current workflow status
+    - notes indicator/excerpt
+    - edit action
+  - a new single-violation detail/edit view was added within the existing `Violations` admin flow using `violation_id`
+  - the single-violation screen is limited to the current install's local site data and shows clear invalid/not-found states
+  - admins can now update one stored violation occurrence with:
+    - workflow status
+    - internal notes
+  - the edit flow reuses the existing violation workflow update helper so current timestamp, user, ignored, and resolved behavior stays centralized
+  - existing grouped violations summary/detail screens remain the entry point
+  - no grouped bulk workflow editing, filters, pagination, CSV export, scanner-service changes, or Phase 6 rescan comparison logic added in this slice
+- Next smallest admin-usability filtering slice implemented in `/wordpress-plugin`:
+  - the main grouped `Violations` screen now includes a small GET-based filter form above the grouped summary table
+  - supported grouped-list filters added:
+    - workflow status
+    - impact / severity
+    - rule ID
+  - filters can be combined and remain limited to the current install's local site data
+  - grouped violation summary filtering is now applied in the DB query itself rather than in PHP after loading all rows
+  - rule ID filtering uses a partial text match on stored rule IDs
+  - existing grouped summary behavior remains in place:
+    - grouped by rule ID + impact
+    - page count
+    - occurrence count
+    - last seen
+    - existing `View` action
+  - no scan filter, page URL filter, pagination, CSV export, rule classification work, scanner-service changes, or Phase 6 rescan comparison logic added in this slice
+- Next smallest WCAG classification slice implemented across `/scanner-service` and `/wordpress-plugin`:
+  - scanner normalized results now preserve axe rule tags per violation
+  - WordPress scanner result validation now accepts and sanitizes stored violation tags
+  - local violation storage now includes a `tags_json` column in `wp_acc_violations`
+  - plugin DB version increased to `3` and the existing installer/db upgrade path now adds the new local tags column
+  - scan result ingestion now stores preserved rule tags with each local violation occurrence
+  - grouped violation summaries now expose one conservative representative stored tags value using the latest local occurrence for that rule ID + impact group
+  - a small shared helper now derives a display classification from stored tags using the MVP rule:
+    - `WCAG A` if tags include `wcag2a` or `wcag21a`
+    - else `WCAG AA` if tags include `wcag2aa` or `wcag21aa`
+    - else `Best Practice` when usable tags exist
+    - `Other` only when stored tags are missing or unusable
+  - derived classification is now shown on:
+    - the main grouped `Violations` screen
+    - the grouped `Violation Detail` screen
+    - the single violation occurrence detail/edit screen
+  - no classification filtering, pagination, CSV export, page URL filtering, scanner behavior changes beyond preserved tags, or Phase 6 rescan comparison logic added in this slice
+- Standalone scanner-service report slice implemented in `/scanner-service`:
+  - existing scanner logic refactored out of `src/index.ts` into small reusable modules
+  - API server entrypoint remains in `src/index.ts` with the existing route shapes and in-memory job flow
+  - standalone CLI entrypoint added in `src/cli.ts`
+  - CLI supports exactly one input mode per run:
+    - `--url`
+    - `--sitemap`
+    - `--urls-file`
+  - CLI writes one self-contained HTML report via `src/report/html-report.ts`
+  - report includes summary totals, failed URLs, severity totals, and page-based violation sections
+  - `scanner-service/package.json` now includes `report` and `report:dist` scripts
+  - `scanner-service/README.md` now documents API service usage and CLI report generation
+  - no WordPress integration changes, database changes, screenshots, PDFs, authenticated flow testing, historical comparison, WCAG criterion grouping, or branding/theming system added in this slice
+- Standalone scanner-service report metrics tightened:
+  - HTML report now distinguishes rule violations from affected elements
+  - summary now shows total rule violations and total affected elements
+  - summary now shows severity totals by rule violation and by affected element
+  - page sections now show per-page rule violation and affected element counts
+  - generated timestamp and input source labels were made more readable
+  - scanner README updated to explain the report metric difference and CLI examples
+  - no route shape changes, WordPress integration changes, database changes, screenshots, PDFs, historical comparison, WCAG criterion grouping, charts, or dashboard features added
+- Phase 6 rescan comparison slice implemented in `/wordpress-plugin`:
+  - completed result ingestion now compares current scan results against earlier scans for the same local site
+  - recurring issues are matched by the existing MVP fingerprint:
+    - normalized URL
+    - rule ID
+    - normalized target selectors
+  - newly stored recurring violation rows now preserve continuity from the latest earlier matching occurrence:
+    - original `first_seen_at`
+    - current `last_seen_at`
+    - workflow status when the prior occurrence was not resolved
+    - internal notes and workflow metadata where applicable
+  - missing prior open issues are automatically marked `Resolved` when their page was successfully included in the new scan result set and their fingerprint no longer appears
+  - auto-resolution is limited to earlier scans for the same local site and only to open workflow statuses:
+    - `New`
+    - `Accepted`
+    - `In Progress`
+    - `Needs Review`
+  - ignored issues remain ignored rather than being auto-resolved
+  - re-fetching results for an older scan does not compare against later scan IDs
+  - the grouped violation occurrence table and single violation occurrence detail view now show a derived scan state:
+    - `New`
+    - `Persistent`
+    - `Resolved`
+  - no scanner-service route changes, database schema changes, template-level grouping, screenshots, exports, or pagination added in this slice
+
+## Current Focus
+Continue MVP hardening on top of the working scan flow and first Phase 6 comparison slice, while leaving pagination and remaining scanner hardening as future work.
+
+## Not Started
+- pagination for violations table
+- scanner hardening items still listed in `TASKS.md`
+
+## Next Recommended Step
+Build the next smallest admin-usability or hardening slice only when requested, such as violations pagination, classification filtering, or the remaining scanner error-handling tasks.
