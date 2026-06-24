@@ -315,6 +315,14 @@ Accessibility Scan Manager MVP
     - `Persistent`
     - `Resolved`
   - no scanner-service route changes, database schema changes, template-level grouping, screenshots, exports, or pagination added in this slice
+- WordPress plugin site-scoped admin UI update implemented:
+  - `Accessibility Scans` now lists sites as the top-level entity
+  - admins can create, edit, and delete site records from the admin UI
+  - each site stores name, base URL, sitemap URL, and active status on the existing `wp_acc_sites` table
+  - site detail pages show configuration, local summary counts, scan history, and accumulated grouped violations for that site
+  - scan initiation, scan listing, scan detail actions, violation listing, grouped violation detail, and single violation workflow edits now carry explicit `site_id`
+  - inactive sites cannot start new scans
+  - existing `ACC_Scan_Orchestrator`, `ACC_Scanner_Client`, fingerprinting, classification logic, and existing schema columns were preserved
 
 ## Current Focus
 Continue MVP hardening on top of the working scan flow and first Phase 6 comparison slice, while leaving pagination and remaining scanner hardening as future work.

@@ -61,6 +61,10 @@ class ACC_Admin {
 			self::handle_save_site_settings();
 		}
 
+		if ( 'delete_site' === $action && 'POST' === strtoupper( $_SERVER['REQUEST_METHOD'] ?? '' ) ) {
+			self::handle_delete_site();
+		}
+
 		if ( 'save_scanner_settings' === $action && 'POST' === strtoupper( $_SERVER['REQUEST_METHOD'] ?? '' ) ) {
 			self::handle_save_scanner_settings();
 		}
@@ -85,16 +89,54 @@ class ACC_Admin {
 	private static function handle_save_site_settings() {
 		check_admin_referer( 'acc_save_site_settings' );
 
-		$site = self::get_or_create_local_site();
-		$data = self::sanitize_site_input( $_POST );
+		$site_id = self::get_site_id_from_source( $_POST );
+		$data    = self::sanitize_site_input( $_POST );
 
 		if ( empty( $data['name'] ) || empty( $data['base_url'] ) ) {
 			self::redirect_with_notice( 'site_error' );
 		}
 
-		$result = ACC_DB::update_site( (int) $site['id'], $data );
+		$is_new_site = $site_id <= 0;
 
-		self::redirect_with_notice( is_wp_error( $result ) ? 'site_error' : 'site_updated' );
+		if ( ! $is_new_site ) {
+			$site = ACC_DB::get_site( $site_id );
+
+			if ( empty( $site ) ) {
+				self::redirect_with_notice( 'site_error' );
+			}
+
+			$result = ACC_DB::update_site( $site_id, $data );
+		} else {
+			$site_id = ACC_DB::create_site( $data );
+			$result  = $site_id;
+		}
+
+		if ( is_wp_error( $result ) ) {
+			self::redirect_with_notice( 'site_error' );
+		}
+
+		self::redirect_with_notice(
+			$is_new_site ? 'site_created' : 'site_updated',
+			self::MENU_SLUG,
+			array(
+				'acc_view' => 'site',
+				'site_id'  => (int) $site_id,
+			)
+		);
+	}
+
+	private static function handle_delete_site() {
+		check_admin_referer( 'acc_delete_site' );
+
+		$site_id = self::get_site_id_from_source( $_POST );
+
+		if ( $site_id <= 0 || empty( ACC_DB::get_site( $site_id ) ) ) {
+			self::redirect_with_notice( 'site_delete_failed' );
+		}
+
+		$result = ACC_DB::delete_site( $site_id );
+
+		self::redirect_with_notice( is_wp_error( $result ) ? 'site_delete_failed' : 'site_deleted' );
 	}
 
 	private static function handle_save_scanner_settings() {
@@ -119,12 +161,17 @@ class ACC_Admin {
 	private static function handle_submit_scan_job() {
 		check_admin_referer( 'acc_submit_scan_job' );
 
-		$site        = self::get_or_create_local_site();
+		$site        = self::get_selected_site_from_source( $_POST );
 		$scan_input  = self::sanitize_scan_trigger_input( $_POST );
+
+		if ( empty( $site ) ) {
+			self::redirect_with_notice( 'scan_submission_invalid', self::SCAN_JOBS_SLUG );
+		}
+
 		$payload     = self::build_scan_request_payload( $site, $scan_input );
 
 		if ( is_wp_error( $payload ) ) {
-			self::redirect_with_notice( 'scan_submission_invalid', self::SCAN_JOBS_SLUG );
+			self::redirect_with_notice( 'scan_submission_invalid', self::SCAN_JOBS_SLUG, array( 'site_id' => (int) $site['id'] ) );
 		}
 
 		$scan_id = ACC_DB::store_scan(
@@ -141,7 +188,7 @@ class ACC_Admin {
 		);
 
 		if ( is_wp_error( $scan_id ) ) {
-			self::redirect_with_notice( 'scan_submission_failed', self::SCAN_JOBS_SLUG );
+			self::redirect_with_notice( 'scan_submission_failed', self::SCAN_JOBS_SLUG, array( 'site_id' => (int) $site['id'] ) );
 		}
 
 		$response = ACC_Scanner_Client::create_scan_job( $payload );
@@ -157,7 +204,7 @@ class ACC_Admin {
 			);
 
 			if ( is_wp_error( $update_result ) ) {
-				self::redirect_with_notice( 'scan_submission_failed', self::SCAN_JOBS_SLUG );
+				self::redirect_with_notice( 'scan_submission_failed', self::SCAN_JOBS_SLUG, array( 'site_id' => (int) $site['id'] ) );
 			}
 
 			self::redirect_with_notice(
@@ -165,6 +212,7 @@ class ACC_Admin {
 				self::SCAN_JOBS_SLUG,
 				array(
 					'acc_view' => 'detail',
+					'site_id'  => (int) $site['id'],
 					'scan_id'  => (int) $scan_id,
 				)
 			);
@@ -185,6 +233,7 @@ class ACC_Admin {
 				self::SCAN_JOBS_SLUG,
 				array(
 					'acc_view' => 'detail',
+					'site_id'  => (int) $site['id'],
 					'scan_id'  => (int) $scan_id,
 				)
 			);
@@ -205,6 +254,7 @@ class ACC_Admin {
 				self::SCAN_JOBS_SLUG,
 				array(
 					'acc_view' => 'detail',
+					'site_id'  => (int) $site['id'],
 					'scan_id'  => (int) $scan_id,
 				)
 			);
@@ -215,6 +265,7 @@ class ACC_Admin {
 			self::SCAN_JOBS_SLUG,
 			array(
 				'acc_view' => 'detail',
+				'site_id'  => (int) $site['id'],
 				'scan_id'  => (int) $scan_id,
 			)
 		);
@@ -223,10 +274,10 @@ class ACC_Admin {
 	private static function handle_refresh_scan_status() {
 		check_admin_referer( 'acc_refresh_scan_status' );
 
-		$site    = self::get_or_create_local_site();
+		$site    = self::get_selected_site_from_source( $_POST );
 		$scan_id = isset( $_POST['scan_id'] ) ? absint( wp_unslash( $_POST['scan_id'] ) ) : 0;
 
-		if ( $scan_id <= 0 ) {
+		if ( empty( $site ) || $scan_id <= 0 ) {
 			self::redirect_with_notice( 'scan_status_refresh_failed', self::SCAN_JOBS_SLUG );
 		}
 
@@ -238,6 +289,7 @@ class ACC_Admin {
 				self::SCAN_JOBS_SLUG,
 				array(
 					'acc_view' => 'detail',
+					'site_id'  => (int) $site['id'],
 					'scan_id'  => $scan_id,
 				)
 			);
@@ -251,6 +303,7 @@ class ACC_Admin {
 				self::SCAN_JOBS_SLUG,
 				array(
 					'acc_view' => 'detail',
+					'site_id'  => (int) $site['id'],
 					'scan_id'  => $scan_id,
 				)
 			);
@@ -261,6 +314,7 @@ class ACC_Admin {
 			self::SCAN_JOBS_SLUG,
 			array(
 				'acc_view' => 'detail',
+				'site_id'  => (int) $site['id'],
 				'scan_id'  => $scan_id,
 			)
 		);
@@ -269,10 +323,10 @@ class ACC_Admin {
 	private static function handle_fetch_scan_results() {
 		check_admin_referer( 'acc_fetch_scan_results' );
 
-		$site    = self::get_or_create_local_site();
+		$site    = self::get_selected_site_from_source( $_POST );
 		$scan_id = isset( $_POST['scan_id'] ) ? absint( wp_unslash( $_POST['scan_id'] ) ) : 0;
 
-		if ( $scan_id <= 0 ) {
+		if ( empty( $site ) || $scan_id <= 0 ) {
 			self::redirect_with_notice( 'scan_results_fetch_failed', self::SCAN_JOBS_SLUG );
 		}
 
@@ -284,6 +338,7 @@ class ACC_Admin {
 				self::SCAN_JOBS_SLUG,
 				array(
 					'acc_view' => 'detail',
+					'site_id'  => (int) $site['id'],
 					'scan_id'  => $scan_id,
 				)
 			);
@@ -297,6 +352,7 @@ class ACC_Admin {
 				self::SCAN_JOBS_SLUG,
 				array(
 					'acc_view' => 'detail',
+					'site_id'  => (int) $site['id'],
 					'scan_id'  => $scan_id,
 				)
 			);
@@ -307,6 +363,7 @@ class ACC_Admin {
 			self::SCAN_JOBS_SLUG,
 			array(
 				'acc_view' => 'detail',
+				'site_id'  => (int) $site['id'],
 				'scan_id'  => $scan_id,
 			)
 		);
@@ -315,10 +372,10 @@ class ACC_Admin {
 	private static function handle_save_violation_workflow() {
 		check_admin_referer( 'acc_save_violation_workflow' );
 
-		$site         = self::get_or_create_local_site();
+		$site         = self::get_selected_site_from_source( $_POST );
 		$violation_id = isset( $_POST['violation_id'] ) ? absint( wp_unslash( $_POST['violation_id'] ) ) : 0;
 
-		if ( $violation_id <= 0 ) {
+		if ( empty( $site ) || $violation_id <= 0 ) {
 			self::redirect_with_notice( 'violation_update_failed', self::VIOLATIONS_SLUG );
 		}
 
@@ -330,6 +387,7 @@ class ACC_Admin {
 				self::VIOLATIONS_SLUG,
 				array(
 					'acc_view'     => 'violation',
+					'site_id'      => (int) $site['id'],
 					'violation_id' => $violation_id,
 				)
 			);
@@ -343,6 +401,7 @@ class ACC_Admin {
 				self::VIOLATIONS_SLUG,
 				array(
 					'acc_view'     => 'violation',
+					'site_id'      => (int) $site['id'],
 					'violation_id' => $violation_id,
 				)
 			);
@@ -360,6 +419,7 @@ class ACC_Admin {
 			self::VIOLATIONS_SLUG,
 			array(
 				'acc_view'     => 'violation',
+				'site_id'      => (int) $site['id'],
 				'violation_id' => $violation_id,
 			)
 		);
@@ -432,33 +492,36 @@ class ACC_Admin {
 		);
 	}
 
-	private static function get_or_create_local_site() {
+	private static function get_site_id_from_source( array $source ) {
+		return isset( $source['site_id'] ) ? absint( wp_unslash( $source['site_id'] ) ) : 0;
+	}
+
+	private static function get_selected_site_from_source( array $source ) {
+		$site_id = self::get_site_id_from_source( $source );
+
+		if ( $site_id > 0 ) {
+			$site = ACC_DB::get_site( $site_id );
+
+			return ! empty( $site ) ? $site : null;
+		}
+
 		$site = ACC_DB::get_local_site();
 
-		if ( ! empty( $site ) ) {
-			return $site;
-		}
+		return ! empty( $site ) ? $site : null;
+	}
 
-		$site_id = ACC_DB::create_site(
-			array(
-				'name'        => get_bloginfo( 'name' ),
-				'base_url'    => home_url( '/' ),
-				'sitemap_url' => '',
-				'is_active'   => 1,
-			)
+	private static function get_selected_site() {
+		return self::get_selected_site_from_source( $_GET );
+	}
+
+	private static function get_default_new_site_values() {
+		return array(
+			'id'          => 0,
+			'name'        => get_bloginfo( 'name' ),
+			'base_url'    => home_url( '/' ),
+			'sitemap_url' => '',
+			'is_active'   => 1,
 		);
-
-		if ( is_wp_error( $site_id ) ) {
-			wp_die( esc_html__( 'The local accessibility site record could not be created.', 'accessibility-scan-manager' ) );
-		}
-
-		$site = ACC_DB::get_site( $site_id );
-
-		if ( empty( $site ) ) {
-			wp_die( esc_html__( 'The local accessibility site record could not be loaded.', 'accessibility-scan-manager' ) );
-		}
-
-		return $site;
 	}
 
 	private static function redirect_with_notice( $notice, $page = self::MENU_SLUG, array $args = array() ) {
@@ -480,69 +543,89 @@ class ACC_Admin {
 			wp_die( esc_html__( 'You do not have permission to access this page.', 'accessibility-scan-manager' ) );
 		}
 
-		$site    = self::get_or_create_local_site();
-		$summary = ACC_DB::get_site_summary( (int) $site['id'] );
 		$scanner_base_url = ACC_Plugin::get_scanner_base_url();
 		$has_scanner_api_key = ACC_Plugin::has_configured_scanner_api_key();
 		$uses_constant_scanner_api_key = ACC_Plugin::uses_constant_scanner_api_key();
+		$view = isset( $_GET['acc_view'] ) ? sanitize_key( wp_unslash( $_GET['acc_view'] ) ) : '';
+
+		if ( in_array( $view, array( 'site', 'new' ), true ) ) {
+			$site = 'new' === $view ? self::get_default_new_site_values() : self::get_selected_site();
+
+			if ( empty( $site ) ) {
+				?>
+				<div class="wrap">
+					<h1><?php echo esc_html__( 'Site Detail', 'accessibility-scan-manager' ); ?></h1>
+					<?php self::render_notice(); ?>
+					<div class="notice notice-warning">
+						<p><?php echo esc_html__( 'The requested site could not be found.', 'accessibility-scan-manager' ); ?></p>
+					</div>
+					<p><a href="<?php echo esc_url( self::get_sites_page_url() ); ?>">&larr; <?php echo esc_html__( 'Back to Sites', 'accessibility-scan-manager' ); ?></a></p>
+				</div>
+				<?php
+
+				return;
+			}
+
+			self::render_site_detail_page( $site );
+
+			return;
+		}
+
+		$sites = ACC_DB::list_sites_with_summary();
 		?>
 		<div class="wrap">
 			<h1><?php echo esc_html__( 'Accessibility Scans', 'accessibility-scan-manager' ); ?></h1>
-			<p><?php echo esc_html__( 'Site configuration for this WordPress install.', 'accessibility-scan-manager' ); ?></p>
+			<p><?php echo esc_html__( 'Manage scan sites and open a site to review its configuration, scan history, and accumulated violations.', 'accessibility-scan-manager' ); ?></p>
 
 			<?php self::render_notice(); ?>
 
-			<h2><?php echo esc_html__( 'Site Settings', 'accessibility-scan-manager' ); ?></h2>
-			<form method="post" action="<?php echo esc_url( admin_url( 'admin.php?page=' . self::MENU_SLUG ) ); ?>">
-				<?php wp_nonce_field( 'acc_save_site_settings' ); ?>
-				<input type="hidden" name="page" value="<?php echo esc_attr( self::MENU_SLUG ); ?>" />
-				<input type="hidden" name="acc_action" value="save_site_settings" />
+			<p><a href="<?php echo esc_url( self::get_new_site_url() ); ?>" class="button button-primary"><?php echo esc_html__( 'Add Site', 'accessibility-scan-manager' ); ?></a></p>
 
-				<table class="form-table" role="presentation">
+			<h2><?php echo esc_html__( 'Sites', 'accessibility-scan-manager' ); ?></h2>
+			<?php if ( empty( $sites ) ) : ?>
+				<div class="notice notice-info">
+					<p><?php echo esc_html__( 'No sites have been created yet.', 'accessibility-scan-manager' ); ?></p>
+				</div>
+			<?php else : ?>
+				<table class="widefat striped">
+					<thead>
+						<tr>
+							<th scope="col"><?php echo esc_html__( 'Name', 'accessibility-scan-manager' ); ?></th>
+							<th scope="col"><?php echo esc_html__( 'Base URL', 'accessibility-scan-manager' ); ?></th>
+							<th scope="col"><?php echo esc_html__( 'Sitemap URL', 'accessibility-scan-manager' ); ?></th>
+							<th scope="col"><?php echo esc_html__( 'Active', 'accessibility-scan-manager' ); ?></th>
+							<th scope="col"><?php echo esc_html__( 'Last Scan', 'accessibility-scan-manager' ); ?></th>
+							<th scope="col"><?php echo esc_html__( 'Scans', 'accessibility-scan-manager' ); ?></th>
+							<th scope="col"><?php echo esc_html__( 'Violations', 'accessibility-scan-manager' ); ?></th>
+							<th scope="col"><?php echo esc_html__( 'Actions', 'accessibility-scan-manager' ); ?></th>
+						</tr>
+					</thead>
 					<tbody>
-						<tr>
-							<th scope="row">
-								<label for="acc-site-name"><?php echo esc_html__( 'Site Name', 'accessibility-scan-manager' ); ?></label>
-							</th>
-							<td>
-								<input name="name" id="acc-site-name" type="text" class="regular-text" required value="<?php echo esc_attr( $site['name'] ); ?>" />
-							</td>
-						</tr>
-						<tr>
-							<th scope="row">
-								<label for="acc-site-base-url"><?php echo esc_html__( 'Base URL', 'accessibility-scan-manager' ); ?></label>
-							</th>
-							<td>
-								<input name="base_url" id="acc-site-base-url" type="url" class="regular-text" required value="<?php echo esc_attr( $site['base_url'] ); ?>" />
-							</td>
-						</tr>
-						<tr>
-							<th scope="row">
-								<label for="acc-site-sitemap-url"><?php echo esc_html__( 'Sitemap URL', 'accessibility-scan-manager' ); ?></label>
-							</th>
-							<td>
-								<input name="sitemap_url" id="acc-site-sitemap-url" type="url" class="regular-text" value="<?php echo esc_attr( $site['sitemap_url'] ); ?>" />
-								<p class="description"><?php echo esc_html__( 'Optional.', 'accessibility-scan-manager' ); ?></p>
-							</td>
-						</tr>
-						<tr>
-							<th scope="row"><?php echo esc_html__( 'Active', 'accessibility-scan-manager' ); ?></th>
-							<td>
-								<label for="acc-site-is-active">
-									<input name="is_active" id="acc-site-is-active" type="checkbox" value="1" <?php checked( (int) $site['is_active'], 1 ); ?> />
-									<?php echo esc_html__( 'Enable scans for this site record', 'accessibility-scan-manager' ); ?>
-								</label>
-							</td>
-						</tr>
+						<?php foreach ( $sites as $site ) : ?>
+							<tr>
+								<td><strong><a href="<?php echo esc_url( self::get_site_detail_url( (int) $site['id'] ) ); ?>"><?php echo esc_html( $site['name'] ); ?></a></strong></td>
+								<td><code><?php echo esc_html( $site['base_url'] ); ?></code></td>
+								<td><?php echo ! empty( $site['sitemap_url'] ) ? '<code>' . esc_html( $site['sitemap_url'] ) . '</code>' : esc_html__( 'None', 'accessibility-scan-manager' ); ?></td>
+								<td><?php echo (int) $site['is_active'] ? esc_html__( 'Yes', 'accessibility-scan-manager' ) : esc_html__( 'No', 'accessibility-scan-manager' ); ?></td>
+								<td><?php echo esc_html( self::format_datetime_value( $site['last_scan_at'], __( 'No scans yet.', 'accessibility-scan-manager' ) ) ); ?></td>
+								<td><?php echo esc_html( number_format_i18n( (int) $site['scan_count'] ) ); ?></td>
+								<td><?php echo esc_html( number_format_i18n( (int) $site['violation_count'] ) ); ?></td>
+								<td>
+									<a href="<?php echo esc_url( self::get_site_detail_url( (int) $site['id'] ) ); ?>"><?php echo esc_html__( 'Open', 'accessibility-scan-manager' ); ?></a>
+									|
+									<a href="<?php echo esc_url( self::get_scan_jobs_page_url( (int) $site['id'] ) ); ?>"><?php echo esc_html__( 'Scans', 'accessibility-scan-manager' ); ?></a>
+									|
+									<a href="<?php echo esc_url( self::get_violations_page_url( (int) $site['id'] ) ); ?>"><?php echo esc_html__( 'Violations', 'accessibility-scan-manager' ); ?></a>
+								</td>
+							</tr>
+						<?php endforeach; ?>
 					</tbody>
 				</table>
-
-				<?php submit_button( __( 'Save Site Settings', 'accessibility-scan-manager' ) ); ?>
-			</form>
+			<?php endif; ?>
 
 			<hr />
 			<h2><?php echo esc_html__( 'Scanner Connection', 'accessibility-scan-manager' ); ?></h2>
-			<p><?php echo esc_html__( 'Connection settings for the external scanner service used by this WordPress install.', 'accessibility-scan-manager' ); ?></p>
+			<p><?php echo esc_html__( 'Connection settings for the external scanner service used by this plugin install.', 'accessibility-scan-manager' ); ?></p>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin.php?page=' . self::MENU_SLUG ) ); ?>">
 				<?php wp_nonce_field( 'acc_save_scanner_settings' ); ?>
 				<input type="hidden" name="page" value="<?php echo esc_attr( self::MENU_SLUG ); ?>" />
@@ -585,36 +668,91 @@ class ACC_Admin {
 
 				<?php submit_button( __( 'Save Scanner Settings', 'accessibility-scan-manager' ) ); ?>
 			</form>
+		</div>
+		<?php
+	}
 
-			<?php if ( is_array( $summary ) ) : ?>
-				<hr />
-				<h2><?php echo esc_html__( 'Local Summary', 'accessibility-scan-manager' ); ?></h2>
-				<table class="widefat striped" style="max-width: 720px;">
+	private static function render_site_detail_page( array $site ) {
+		$is_new              = empty( $site['id'] );
+		$summary             = $is_new ? null : ACC_DB::get_site_summary( (int) $site['id'] );
+		$scan_jobs           = $is_new ? array() : ACC_DB::list_scan_jobs_for_site( (int) $site['id'] );
+		$violation_summaries = $is_new ? array() : ACC_DB::list_violation_summaries_for_site( (int) $site['id'] );
+		?>
+		<div class="wrap">
+			<h1><?php echo esc_html( $is_new ? __( 'Add Site', 'accessibility-scan-manager' ) : __( 'Site Detail', 'accessibility-scan-manager' ) ); ?></h1>
+			<p><a href="<?php echo esc_url( self::get_sites_page_url() ); ?>">&larr; <?php echo esc_html__( 'Back to Sites', 'accessibility-scan-manager' ); ?></a></p>
+
+			<?php self::render_notice(); ?>
+
+			<h2><?php echo esc_html__( 'Configuration', 'accessibility-scan-manager' ); ?></h2>
+			<form method="post" action="<?php echo esc_url( $is_new ? self::get_new_site_url() : self::get_site_detail_url( (int) $site['id'] ) ); ?>">
+				<?php wp_nonce_field( 'acc_save_site_settings' ); ?>
+				<input type="hidden" name="page" value="<?php echo esc_attr( self::MENU_SLUG ); ?>" />
+				<input type="hidden" name="acc_action" value="save_site_settings" />
+				<input type="hidden" name="site_id" value="<?php echo esc_attr( (string) (int) $site['id'] ); ?>" />
+
+				<table class="form-table" role="presentation">
 					<tbody>
 						<tr>
-							<th scope="row"><?php echo esc_html__( 'Scans', 'accessibility-scan-manager' ); ?></th>
-							<td><?php echo esc_html( number_format_i18n( (int) $summary['scan_count'] ) ); ?></td>
+							<th scope="row"><label for="acc-site-name"><?php echo esc_html__( 'Site Name', 'accessibility-scan-manager' ); ?></label></th>
+							<td><input name="name" id="acc-site-name" type="text" class="regular-text" required value="<?php echo esc_attr( $site['name'] ); ?>" /></td>
 						</tr>
 						<tr>
-							<th scope="row"><?php echo esc_html__( 'Scanned URLs', 'accessibility-scan-manager' ); ?></th>
-							<td><?php echo esc_html( number_format_i18n( (int) $summary['url_count'] ) ); ?></td>
+							<th scope="row"><label for="acc-site-base-url"><?php echo esc_html__( 'Base URL', 'accessibility-scan-manager' ); ?></label></th>
+							<td><input name="base_url" id="acc-site-base-url" type="url" class="regular-text" required value="<?php echo esc_attr( $site['base_url'] ); ?>" /></td>
 						</tr>
 						<tr>
-							<th scope="row"><?php echo esc_html__( 'Violations', 'accessibility-scan-manager' ); ?></th>
-							<td><?php echo esc_html( number_format_i18n( (int) $summary['violation_count'] ) ); ?></td>
-						</tr>
-						<tr>
-							<th scope="row"><?php echo esc_html__( 'Last Scan Started', 'accessibility-scan-manager' ); ?></th>
+							<th scope="row"><label for="acc-site-sitemap-url"><?php echo esc_html__( 'Sitemap URL', 'accessibility-scan-manager' ); ?></label></th>
 							<td>
-								<?php
-								echo ! empty( $summary['last_scan_at'] )
-									? esc_html( $summary['last_scan_at'] )
-									: esc_html__( 'No scans yet.', 'accessibility-scan-manager' );
-								?>
+								<input name="sitemap_url" id="acc-site-sitemap-url" type="url" class="regular-text" value="<?php echo esc_attr( $site['sitemap_url'] ); ?>" />
+								<p class="description"><?php echo esc_html__( 'Optional. Sitemap scans use this URL for this site only.', 'accessibility-scan-manager' ); ?></p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row"><?php echo esc_html__( 'Active', 'accessibility-scan-manager' ); ?></th>
+							<td>
+								<label for="acc-site-is-active">
+									<input name="is_active" id="acc-site-is-active" type="checkbox" value="1" <?php checked( (int) $site['is_active'], 1 ); ?> />
+									<?php echo esc_html__( 'Enable scans for this site', 'accessibility-scan-manager' ); ?>
+								</label>
 							</td>
 						</tr>
 					</tbody>
 				</table>
+
+				<?php submit_button( $is_new ? __( 'Create Site', 'accessibility-scan-manager' ) : __( 'Save Site', 'accessibility-scan-manager' ) ); ?>
+			</form>
+
+			<?php if ( ! $is_new ) : ?>
+				<form method="post" action="<?php echo esc_url( self::get_site_detail_url( (int) $site['id'] ) ); ?>" onsubmit="return confirm('<?php echo esc_js( __( 'Delete this site and all of its stored scans and violations?', 'accessibility-scan-manager' ) ); ?>');">
+					<?php wp_nonce_field( 'acc_delete_site' ); ?>
+					<input type="hidden" name="page" value="<?php echo esc_attr( self::MENU_SLUG ); ?>" />
+					<input type="hidden" name="acc_action" value="delete_site" />
+					<input type="hidden" name="site_id" value="<?php echo esc_attr( (string) (int) $site['id'] ); ?>" />
+					<?php submit_button( __( 'Delete Site', 'accessibility-scan-manager' ), 'delete', 'submit', false ); ?>
+				</form>
+
+				<hr />
+				<h2><?php echo esc_html__( 'Site Summary', 'accessibility-scan-manager' ); ?></h2>
+				<table class="widefat striped" style="max-width: 720px;">
+					<tbody>
+						<tr><th scope="row"><?php echo esc_html__( 'Scans', 'accessibility-scan-manager' ); ?></th><td><?php echo esc_html( number_format_i18n( (int) $summary['scan_count'] ) ); ?></td></tr>
+						<tr><th scope="row"><?php echo esc_html__( 'Scanned URLs', 'accessibility-scan-manager' ); ?></th><td><?php echo esc_html( number_format_i18n( (int) $summary['url_count'] ) ); ?></td></tr>
+						<tr><th scope="row"><?php echo esc_html__( 'Violations', 'accessibility-scan-manager' ); ?></th><td><?php echo esc_html( number_format_i18n( (int) $summary['violation_count'] ) ); ?></td></tr>
+						<tr><th scope="row"><?php echo esc_html__( 'Last Scan Started', 'accessibility-scan-manager' ); ?></th><td><?php echo esc_html( self::format_datetime_value( $summary['last_scan_at'], __( 'No scans yet.', 'accessibility-scan-manager' ) ) ); ?></td></tr>
+					</tbody>
+				</table>
+
+				<p>
+					<a class="button" href="<?php echo esc_url( self::get_scan_jobs_page_url( (int) $site['id'] ) ); ?>"><?php echo esc_html__( 'Manage Scans', 'accessibility-scan-manager' ); ?></a>
+					<a class="button" href="<?php echo esc_url( self::get_violations_page_url( (int) $site['id'] ) ); ?>"><?php echo esc_html__( 'View Violations', 'accessibility-scan-manager' ); ?></a>
+				</p>
+
+				<h2><?php echo esc_html__( 'Scan History', 'accessibility-scan-manager' ); ?></h2>
+				<?php self::render_scan_jobs_table( $site, $scan_jobs ); ?>
+
+				<h2><?php echo esc_html__( 'Accumulated Violations', 'accessibility-scan-manager' ); ?></h2>
+				<?php self::render_violation_summaries_table( $site, $violation_summaries ); ?>
 			<?php endif; ?>
 		</div>
 		<?php
@@ -625,7 +763,22 @@ class ACC_Admin {
 			wp_die( esc_html__( 'You do not have permission to access this page.', 'accessibility-scan-manager' ) );
 		}
 
-		$site = self::get_or_create_local_site();
+		$site = self::get_selected_site();
+
+		if ( empty( $site ) ) {
+			?>
+			<div class="wrap">
+				<h1><?php echo esc_html__( 'Scan Jobs', 'accessibility-scan-manager' ); ?></h1>
+				<?php self::render_notice(); ?>
+				<div class="notice notice-info">
+					<p><?php echo esc_html__( 'Create a site before starting scan jobs.', 'accessibility-scan-manager' ); ?></p>
+				</div>
+				<p><a href="<?php echo esc_url( self::get_new_site_url() ); ?>" class="button button-primary"><?php echo esc_html__( 'Add Site', 'accessibility-scan-manager' ); ?></a></p>
+			</div>
+			<?php
+
+			return;
+		}
 
 		if ( self::is_scan_detail_view() ) {
 			self::render_scan_detail_view( $site );
@@ -637,14 +790,29 @@ class ACC_Admin {
 		?>
 		<div class="wrap">
 			<h1><?php echo esc_html__( 'Scan Jobs', 'accessibility-scan-manager' ); ?></h1>
-			<p><?php echo esc_html__( 'Start a scan and review stored scan jobs for this WordPress install.', 'accessibility-scan-manager' ); ?></p>
+			<p>
+				<?php
+				printf(
+					/* translators: %s: site name */
+					esc_html__( 'Start a scan and review stored scan jobs for %s.', 'accessibility-scan-manager' ),
+					'<strong>' . esc_html( $site['name'] ) . '</strong>'
+				);
+				?>
+			</p>
 
 			<?php self::render_notice(); ?>
+			<?php self::render_site_switcher( self::SCAN_JOBS_SLUG, (int) $site['id'] ); ?>
 
 			<h2><?php echo esc_html__( 'Start Scan', 'accessibility-scan-manager' ); ?></h2>
-			<form method="post" action="<?php echo esc_url( admin_url( 'admin.php?page=' . self::SCAN_JOBS_SLUG ) ); ?>">
+			<?php if ( ! (int) $site['is_active'] ) : ?>
+				<div class="notice notice-warning">
+					<p><?php echo esc_html__( 'This site is inactive. Activate it in the site configuration before starting scans.', 'accessibility-scan-manager' ); ?></p>
+				</div>
+			<?php else : ?>
+			<form method="post" action="<?php echo esc_url( self::get_scan_jobs_page_url( (int) $site['id'] ) ); ?>">
 				<?php wp_nonce_field( 'acc_submit_scan_job' ); ?>
 				<input type="hidden" name="page" value="<?php echo esc_attr( self::SCAN_JOBS_SLUG ); ?>" />
+				<input type="hidden" name="site_id" value="<?php echo esc_attr( (string) $site['id'] ); ?>" />
 				<input type="hidden" name="acc_action" value="submit_scan_job" />
 
 				<table class="form-table" role="presentation">
@@ -658,7 +826,7 @@ class ACC_Admin {
 									<option value="sitemap"><?php echo esc_html__( 'Sitemap', 'accessibility-scan-manager' ); ?></option>
 									<option value="manual"><?php echo esc_html__( 'Manual URL List', 'accessibility-scan-manager' ); ?></option>
 								</select>
-								<p class="description"><?php echo esc_html__( 'Sitemap mode uses the saved sitemap URL from Site Settings. Manual mode uses one absolute URL per line below.', 'accessibility-scan-manager' ); ?></p>
+								<p class="description"><?php echo esc_html__( 'Sitemap mode uses this site\'s saved sitemap URL. Manual mode uses one absolute URL per line below.', 'accessibility-scan-manager' ); ?></p>
 							</td>
 						</tr>
 						<tr>
@@ -675,49 +843,19 @@ class ACC_Admin {
 
 				<?php submit_button( __( 'Start Scan', 'accessibility-scan-manager' ) ); ?>
 			</form>
+			<?php endif; ?>
 
 			<hr />
 			<h2><?php echo esc_html__( 'Stored Scan Jobs', 'accessibility-scan-manager' ); ?></h2>
 
-			<?php if ( empty( $scan_jobs ) ) : ?>
-				<div class="notice notice-info">
-					<p><?php echo esc_html__( 'No scan jobs have been stored for this site yet.', 'accessibility-scan-manager' ); ?></p>
-				</div>
-			<?php else : ?>
-				<table class="widefat striped">
-					<thead>
-						<tr>
-							<th scope="col"><?php echo esc_html__( 'Status', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'Mode', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'Started', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'Finished', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'URL Count', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'Violation Count', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'Actions', 'accessibility-scan-manager' ); ?></th>
-						</tr>
-					</thead>
-					<tbody>
-						<?php foreach ( $scan_jobs as $scan_job ) : ?>
-							<tr>
-								<td><?php echo esc_html( $scan_job['status'] ); ?></td>
-								<td><?php echo esc_html( $scan_job['scan_mode'] ); ?></td>
-								<td><?php echo esc_html( self::format_datetime_value( $scan_job['started_at'], __( 'Not started yet.', 'accessibility-scan-manager' ) ) ); ?></td>
-								<td><?php echo esc_html( self::format_datetime_value( $scan_job['finished_at'], __( 'Not finished yet.', 'accessibility-scan-manager' ) ) ); ?></td>
-								<td><?php echo esc_html( number_format_i18n( (int) $scan_job['url_count'] ) ); ?></td>
-								<td><?php echo esc_html( number_format_i18n( (int) $scan_job['violation_count'] ) ); ?></td>
-								<td><a href="<?php echo esc_url( self::get_scan_detail_url( $scan_job['id'] ) ); ?>"><?php echo esc_html__( 'View', 'accessibility-scan-manager' ); ?></a></td>
-							</tr>
-						<?php endforeach; ?>
-					</tbody>
-				</table>
-			<?php endif; ?>
+			<?php self::render_scan_jobs_table( $site, $scan_jobs ); ?>
 		</div>
 		<?php
 	}
 
 	private static function render_scan_detail_view( array $site ) {
 		$scan_id  = self::get_scan_id_param();
-		$back_url = self::get_scan_jobs_page_url();
+		$back_url = self::get_scan_jobs_page_url( (int) $site['id'] );
 		?>
 		<div class="wrap">
 			<h1><?php echo esc_html__( 'Scan Detail', 'accessibility-scan-manager' ); ?></h1>
@@ -748,23 +886,25 @@ class ACC_Admin {
 
 			$scan_urls = ACC_DB::list_scan_urls_for_site_scan( (int) $site['id'], (int) $scan['id'] );
 			?>
-			<p><?php echo esc_html__( 'Read-only detail view for one stored scan on this WordPress install.', 'accessibility-scan-manager' ); ?></p>
+			<p><?php echo esc_html__( 'Read-only detail view for one stored scan on the selected site.', 'accessibility-scan-manager' ); ?></p>
 
 			<?php if ( ! empty( $scan['remote_job_id'] ) ) : ?>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin.php?page=' . self::SCAN_JOBS_SLUG ) ); ?>" style="margin: 1em 0;">
+				<form method="post" action="<?php echo esc_url( self::get_scan_detail_url( (int) $scan['id'], (int) $site['id'] ) ); ?>" style="margin: 1em 0;">
 					<?php wp_nonce_field( 'acc_refresh_scan_status' ); ?>
 					<input type="hidden" name="page" value="<?php echo esc_attr( self::SCAN_JOBS_SLUG ); ?>" />
 					<input type="hidden" name="acc_action" value="refresh_scan_status" />
+					<input type="hidden" name="site_id" value="<?php echo esc_attr( (string) $site['id'] ); ?>" />
 					<input type="hidden" name="scan_id" value="<?php echo esc_attr( (string) $scan['id'] ); ?>" />
 					<?php submit_button( __( 'Refresh Status', 'accessibility-scan-manager' ), 'secondary', 'submit', false ); ?>
 				</form>
 			<?php endif; ?>
 
 			<?php if ( ! empty( $scan['remote_job_id'] ) && 'completed' === (string) $scan['status'] ) : ?>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin.php?page=' . self::SCAN_JOBS_SLUG ) ); ?>" style="margin: 1em 0;">
+				<form method="post" action="<?php echo esc_url( self::get_scan_detail_url( (int) $scan['id'], (int) $site['id'] ) ); ?>" style="margin: 1em 0;">
 					<?php wp_nonce_field( 'acc_fetch_scan_results' ); ?>
 					<input type="hidden" name="page" value="<?php echo esc_attr( self::SCAN_JOBS_SLUG ); ?>" />
 					<input type="hidden" name="acc_action" value="fetch_scan_results" />
+					<input type="hidden" name="site_id" value="<?php echo esc_attr( (string) $site['id'] ); ?>" />
 					<input type="hidden" name="scan_id" value="<?php echo esc_attr( (string) $scan['id'] ); ?>" />
 					<?php submit_button( __( 'Fetch Results', 'accessibility-scan-manager' ), 'secondary', 'submit', false ); ?>
 				</form>
@@ -851,7 +991,22 @@ class ACC_Admin {
 			wp_die( esc_html__( 'You do not have permission to access this page.', 'accessibility-scan-manager' ) );
 		}
 
-		$site = self::get_or_create_local_site();
+		$site = self::get_selected_site();
+
+		if ( empty( $site ) ) {
+			?>
+			<div class="wrap">
+				<h1><?php echo esc_html__( 'Violations', 'accessibility-scan-manager' ); ?></h1>
+				<?php self::render_notice(); ?>
+				<div class="notice notice-info">
+					<p><?php echo esc_html__( 'Create a site before reviewing violations.', 'accessibility-scan-manager' ); ?></p>
+				</div>
+				<p><a href="<?php echo esc_url( self::get_new_site_url() ); ?>" class="button button-primary"><?php echo esc_html__( 'Add Site', 'accessibility-scan-manager' ); ?></a></p>
+			</div>
+			<?php
+
+			return;
+		}
 
 		if ( self::is_single_violation_view() ) {
 			self::render_single_violation_view( $site );
@@ -870,12 +1025,22 @@ class ACC_Admin {
 		?>
 		<div class="wrap">
 			<h1><?php echo esc_html__( 'Violations', 'accessibility-scan-manager' ); ?></h1>
-			<p><?php echo esc_html__( 'Grouped violation summary for this WordPress install.', 'accessibility-scan-manager' ); ?></p>
+			<p>
+				<?php
+				printf(
+					/* translators: %s: site name */
+					esc_html__( 'Grouped violation summary for %s.', 'accessibility-scan-manager' ),
+					'<strong>' . esc_html( $site['name'] ) . '</strong>'
+				);
+				?>
+			</p>
 
 			<?php self::render_notice(); ?>
+			<?php self::render_site_switcher( self::VIOLATIONS_SLUG, (int) $site['id'] ); ?>
 
 			<form method="get" action="<?php echo esc_url( admin_url( 'admin.php' ) ); ?>" style="margin: 1em 0 1.5em;">
 				<input type="hidden" name="page" value="<?php echo esc_attr( self::VIOLATIONS_SLUG ); ?>" />
+				<input type="hidden" name="site_id" value="<?php echo esc_attr( (string) $site['id'] ); ?>" />
 				<table class="form-table" role="presentation" style="margin-top: 0;">
 					<tbody>
 						<tr>
@@ -917,47 +1082,10 @@ class ACC_Admin {
 				</table>
 
 				<?php submit_button( __( 'Filter', 'accessibility-scan-manager' ), 'secondary', '', false ); ?>
-				<a href="<?php echo esc_url( self::get_violations_page_url() ); ?>" class="button"><?php echo esc_html__( 'Clear', 'accessibility-scan-manager' ); ?></a>
+				<a href="<?php echo esc_url( self::get_violations_page_url( (int) $site['id'] ) ); ?>" class="button"><?php echo esc_html__( 'Clear', 'accessibility-scan-manager' ); ?></a>
 			</form>
 
-			<?php if ( empty( $violation_summaries ) ) : ?>
-				<div class="notice notice-info">
-					<p>
-						<?php
-						echo self::has_active_violation_filters( $filters )
-							? esc_html__( 'No grouped violations matched the current filters for this site.', 'accessibility-scan-manager' )
-							: esc_html__( 'No violations have been stored for this site yet.', 'accessibility-scan-manager' );
-						?>
-					</p>
-				</div>
-			<?php else : ?>
-				<table class="widefat striped">
-					<thead>
-						<tr>
-							<th scope="col"><?php echo esc_html__( 'Rule', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'Classification', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'Impact', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'Page Count', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'Occurrence Count', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'Last Seen', 'accessibility-scan-manager' ); ?></th>
-							<th scope="col"><?php echo esc_html__( 'Actions', 'accessibility-scan-manager' ); ?></th>
-						</tr>
-					</thead>
-					<tbody>
-						<?php foreach ( $violation_summaries as $violation_summary ) : ?>
-							<tr>
-								<td><code><?php echo esc_html( $violation_summary['rule_id'] ); ?></code></td>
-								<td><?php echo esc_html( self::get_violation_classification_label( $violation_summary['tags_json'] ?? '' ) ); ?></td>
-								<td><?php echo esc_html( self::format_violation_impact( $violation_summary['impact'] ) ); ?></td>
-								<td><?php echo esc_html( number_format_i18n( (int) $violation_summary['page_count'] ) ); ?></td>
-								<td><?php echo esc_html( number_format_i18n( (int) $violation_summary['occurrence_count'] ) ); ?></td>
-								<td><?php echo esc_html( self::format_datetime_value( $violation_summary['last_seen_at'], __( 'Not available.', 'accessibility-scan-manager' ) ) ); ?></td>
-								<td><a href="<?php echo esc_url( self::get_violation_detail_url( $violation_summary['rule_id'], $violation_summary['impact'] ) ); ?>"><?php echo esc_html__( 'View', 'accessibility-scan-manager' ); ?></a></td>
-							</tr>
-						<?php endforeach; ?>
-					</tbody>
-				</table>
-			<?php endif; ?>
+			<?php self::render_violation_summaries_table( $site, $violation_summaries, $filters ); ?>
 		</div>
 		<?php
 	}
@@ -965,7 +1093,7 @@ class ACC_Admin {
 	private static function render_violation_detail_view( array $site ) {
 		$rule_id = self::get_violation_rule_id_param();
 		$impact  = self::get_violation_impact_param();
-		$back_url = self::get_violations_page_url();
+		$back_url = self::get_violations_page_url( (int) $site['id'] );
 		?>
 		<div class="wrap">
 			<h1><?php echo esc_html__( 'Violation Detail', 'accessibility-scan-manager' ); ?></h1>
@@ -997,7 +1125,7 @@ class ACC_Admin {
 			$pages = ACC_DB::list_violation_pages_for_site( (int) $site['id'], $summary['rule_id'], $summary['impact'] );
 			$occurrences = ACC_DB::list_violation_occurrences_for_site( (int) $site['id'], $summary['rule_id'], $summary['impact'] );
 			?>
-			<p><?php echo esc_html__( 'Grouped detail view for one violation summary on this WordPress install, with links to individual stored occurrences.', 'accessibility-scan-manager' ); ?></p>
+			<p><?php echo esc_html__( 'Grouped detail view for one violation summary on the selected site, with links to individual stored occurrences.', 'accessibility-scan-manager' ); ?></p>
 
 			<table class="form-table" role="presentation">
 				<tbody>
@@ -1087,7 +1215,7 @@ class ACC_Admin {
 								<td><?php echo esc_html( self::format_scan_state( $occurrence ) ); ?></td>
 								<td><?php echo esc_html( self::format_workflow_status( $occurrence['workflow_status'] ) ); ?></td>
 								<td><?php echo esc_html( self::get_violation_notes_excerpt( $occurrence['notes'] ?? '' ) ); ?></td>
-								<td><a href="<?php echo esc_url( self::get_single_violation_url( (int) $occurrence['id'] ) ); ?>"><?php echo esc_html__( 'Edit', 'accessibility-scan-manager' ); ?></a></td>
+								<td><a href="<?php echo esc_url( self::get_single_violation_url( (int) $occurrence['id'], (int) $site['id'] ) ); ?>"><?php echo esc_html__( 'Edit', 'accessibility-scan-manager' ); ?></a></td>
 							</tr>
 						<?php endforeach; ?>
 					</tbody>
@@ -1125,7 +1253,7 @@ class ACC_Admin {
 
 	private static function render_single_violation_view( array $site ) {
 		$violation_id = self::get_violation_id_param();
-		$back_url     = self::get_violations_page_url();
+		$back_url     = self::get_violations_page_url( (int) $site['id'] );
 		?>
 		<div class="wrap">
 			<h1><?php echo esc_html__( 'Violation Occurrence', 'accessibility-scan-manager' ); ?></h1>
@@ -1154,10 +1282,10 @@ class ACC_Admin {
 				return;
 			}
 
-			$group_back_url = self::get_violation_detail_url( $violation['rule_id'], $violation['impact'] );
+			$group_back_url = self::get_violation_detail_url( $violation['rule_id'], $violation['impact'], (int) $site['id'] );
 			?>
 			<p><a href="<?php echo esc_url( $group_back_url ); ?>">&larr; <?php echo esc_html__( 'Back to Grouped Violation Detail', 'accessibility-scan-manager' ); ?></a></p>
-			<p><?php echo esc_html__( 'Review and edit one stored violation occurrence for this WordPress install.', 'accessibility-scan-manager' ); ?></p>
+			<p><?php echo esc_html__( 'Review and edit one stored violation occurrence for the selected site.', 'accessibility-scan-manager' ); ?></p>
 
 			<table class="form-table" role="presentation">
 				<tbody>
@@ -1239,11 +1367,12 @@ class ACC_Admin {
 			</table>
 
 			<h2><?php echo esc_html__( 'Edit Workflow', 'accessibility-scan-manager' ); ?></h2>
-			<form method="post" action="<?php echo esc_url( self::get_single_violation_url( (int) $violation['id'] ) ); ?>">
+			<form method="post" action="<?php echo esc_url( self::get_single_violation_url( (int) $violation['id'], (int) $site['id'] ) ); ?>">
 				<?php wp_nonce_field( 'acc_save_violation_workflow' ); ?>
 				<input type="hidden" name="page" value="<?php echo esc_attr( self::VIOLATIONS_SLUG ); ?>" />
 				<input type="hidden" name="acc_view" value="violation" />
 				<input type="hidden" name="acc_action" value="save_violation_workflow" />
+				<input type="hidden" name="site_id" value="<?php echo esc_attr( (string) $site['id'] ); ?>" />
 				<input type="hidden" name="violation_id" value="<?php echo esc_attr( (string) $violation['id'] ); ?>" />
 
 				<table class="form-table" role="presentation">
@@ -1278,6 +1407,112 @@ class ACC_Admin {
 		<?php
 	}
 
+	private static function render_site_switcher( $page_slug, $selected_site_id ) {
+		$sites = ACC_DB::list_sites();
+
+		if ( count( $sites ) <= 1 ) {
+			return;
+		}
+		?>
+		<form method="get" action="<?php echo esc_url( admin_url( 'admin.php' ) ); ?>" style="margin: 1em 0;">
+			<input type="hidden" name="page" value="<?php echo esc_attr( $page_slug ); ?>" />
+			<label for="acc-site-switcher"><?php echo esc_html__( 'Site', 'accessibility-scan-manager' ); ?></label>
+			<select name="site_id" id="acc-site-switcher">
+				<?php foreach ( $sites as $site ) : ?>
+					<option value="<?php echo esc_attr( (string) $site['id'] ); ?>" <?php selected( (int) $selected_site_id, (int) $site['id'] ); ?>><?php echo esc_html( $site['name'] ); ?></option>
+				<?php endforeach; ?>
+			</select>
+			<?php submit_button( __( 'Switch Site', 'accessibility-scan-manager' ), 'secondary', '', false ); ?>
+		</form>
+		<?php
+	}
+
+	private static function render_scan_jobs_table( array $site, array $scan_jobs ) {
+		if ( empty( $scan_jobs ) ) {
+			?>
+			<div class="notice notice-info">
+				<p><?php echo esc_html__( 'No scan jobs have been stored for this site yet.', 'accessibility-scan-manager' ); ?></p>
+			</div>
+			<?php
+
+			return;
+		}
+		?>
+		<table class="widefat striped">
+			<thead>
+				<tr>
+					<th scope="col"><?php echo esc_html__( 'Status', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'Mode', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'Started', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'Finished', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'URL Count', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'Violation Count', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'Actions', 'accessibility-scan-manager' ); ?></th>
+				</tr>
+			</thead>
+			<tbody>
+				<?php foreach ( $scan_jobs as $scan_job ) : ?>
+					<tr>
+						<td><?php echo esc_html( $scan_job['status'] ); ?></td>
+						<td><?php echo esc_html( $scan_job['scan_mode'] ); ?></td>
+						<td><?php echo esc_html( self::format_datetime_value( $scan_job['started_at'], __( 'Not started yet.', 'accessibility-scan-manager' ) ) ); ?></td>
+						<td><?php echo esc_html( self::format_datetime_value( $scan_job['finished_at'], __( 'Not finished yet.', 'accessibility-scan-manager' ) ) ); ?></td>
+						<td><?php echo esc_html( number_format_i18n( (int) $scan_job['url_count'] ) ); ?></td>
+						<td><?php echo esc_html( number_format_i18n( (int) $scan_job['violation_count'] ) ); ?></td>
+						<td><a href="<?php echo esc_url( self::get_scan_detail_url( (int) $scan_job['id'], (int) $site['id'] ) ); ?>"><?php echo esc_html__( 'View', 'accessibility-scan-manager' ); ?></a></td>
+					</tr>
+				<?php endforeach; ?>
+			</tbody>
+		</table>
+		<?php
+	}
+
+	private static function render_violation_summaries_table( array $site, array $violation_summaries, array $filters = array() ) {
+		if ( empty( $violation_summaries ) ) {
+			?>
+			<div class="notice notice-info">
+				<p>
+					<?php
+					echo self::has_active_violation_filters( $filters )
+						? esc_html__( 'No grouped violations matched the current filters for this site.', 'accessibility-scan-manager' )
+						: esc_html__( 'No violations have been stored for this site yet.', 'accessibility-scan-manager' );
+					?>
+				</p>
+			</div>
+			<?php
+
+			return;
+		}
+		?>
+		<table class="widefat striped">
+			<thead>
+				<tr>
+					<th scope="col"><?php echo esc_html__( 'Rule', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'Classification', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'Impact', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'Page Count', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'Occurrence Count', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'Last Seen', 'accessibility-scan-manager' ); ?></th>
+					<th scope="col"><?php echo esc_html__( 'Actions', 'accessibility-scan-manager' ); ?></th>
+				</tr>
+			</thead>
+			<tbody>
+				<?php foreach ( $violation_summaries as $violation_summary ) : ?>
+					<tr>
+						<td><code><?php echo esc_html( $violation_summary['rule_id'] ); ?></code></td>
+						<td><?php echo esc_html( self::get_violation_classification_label( $violation_summary['tags_json'] ?? '' ) ); ?></td>
+						<td><?php echo esc_html( self::format_violation_impact( $violation_summary['impact'] ) ); ?></td>
+						<td><?php echo esc_html( number_format_i18n( (int) $violation_summary['page_count'] ) ); ?></td>
+						<td><?php echo esc_html( number_format_i18n( (int) $violation_summary['occurrence_count'] ) ); ?></td>
+						<td><?php echo esc_html( self::format_datetime_value( $violation_summary['last_seen_at'], __( 'Not available.', 'accessibility-scan-manager' ) ) ); ?></td>
+						<td><a href="<?php echo esc_url( self::get_violation_detail_url( $violation_summary['rule_id'], $violation_summary['impact'], (int) $site['id'] ) ); ?>"><?php echo esc_html__( 'View', 'accessibility-scan-manager' ); ?></a></td>
+					</tr>
+				<?php endforeach; ?>
+			</tbody>
+		</table>
+		<?php
+	}
+
 	private static function render_notice() {
 		$notice = isset( $_GET['acc_notice'] ) ? sanitize_key( wp_unslash( $_GET['acc_notice'] ) ) : '';
 
@@ -1290,9 +1525,21 @@ class ACC_Admin {
 				'class'   => 'notice notice-success is-dismissible',
 				'message' => __( 'Site settings saved.', 'accessibility-scan-manager' ),
 			),
+			'site_created' => array(
+				'class'   => 'notice notice-success is-dismissible',
+				'message' => __( 'Site created.', 'accessibility-scan-manager' ),
+			),
+			'site_deleted' => array(
+				'class'   => 'notice notice-success is-dismissible',
+				'message' => __( 'Site deleted.', 'accessibility-scan-manager' ),
+			),
 			'site_error'   => array(
 				'class'   => 'notice notice-error',
 				'message' => __( 'The site settings could not be saved.', 'accessibility-scan-manager' ),
+			),
+			'site_delete_failed' => array(
+				'class'   => 'notice notice-error',
+				'message' => __( 'The site could not be deleted.', 'accessibility-scan-manager' ),
 			),
 			'scanner_settings_saved' => array(
 				'class'   => 'notice notice-success is-dismissible',
@@ -1424,54 +1671,114 @@ class ACC_Admin {
 		return isset( $_GET['violation_id'] ) ? absint( wp_unslash( $_GET['violation_id'] ) ) : 0;
 	}
 
-	private static function get_violation_detail_url( $rule_id, $impact ) {
+	private static function get_sites_page_url() {
 		return add_query_arg(
 			array(
-				'page'     => self::VIOLATIONS_SLUG,
-				'acc_view' => 'detail',
-				'rule_id'  => sanitize_text_field( (string) $rule_id ),
-				'impact'   => sanitize_text_field( (string) $impact ),
+				'page' => self::MENU_SLUG,
 			),
 			admin_url( 'admin.php' )
 		);
 	}
 
-	private static function get_violations_page_url() {
+	private static function get_new_site_url() {
 		return add_query_arg(
 			array(
-				'page' => self::VIOLATIONS_SLUG,
+				'page'     => self::MENU_SLUG,
+				'acc_view' => 'new',
 			),
 			admin_url( 'admin.php' )
 		);
 	}
 
-	private static function get_single_violation_url( $violation_id ) {
+	private static function get_site_detail_url( $site_id ) {
 		return add_query_arg(
 			array(
-				'page'         => self::VIOLATIONS_SLUG,
-				'acc_view'     => 'violation',
-				'violation_id' => absint( $violation_id ),
+				'page'     => self::MENU_SLUG,
+				'acc_view' => 'site',
+				'site_id'  => absint( $site_id ),
 			),
 			admin_url( 'admin.php' )
 		);
 	}
 
-	private static function get_scan_detail_url( $scan_id ) {
+	private static function get_violation_detail_url( $rule_id, $impact, $site_id = 0 ) {
+		$args = array(
+			'page'     => self::VIOLATIONS_SLUG,
+			'acc_view' => 'detail',
+			'rule_id'  => sanitize_text_field( (string) $rule_id ),
+			'impact'   => sanitize_text_field( (string) $impact ),
+		);
+
+		if ( $site_id > 0 ) {
+			$args['site_id'] = absint( $site_id );
+		}
+
 		return add_query_arg(
-			array(
-				'page'     => self::SCAN_JOBS_SLUG,
-				'acc_view' => 'detail',
-				'scan_id'  => absint( $scan_id ),
-			),
+			$args,
 			admin_url( 'admin.php' )
 		);
 	}
 
-	private static function get_scan_jobs_page_url() {
+	private static function get_violations_page_url( $site_id = 0 ) {
+		$args = array(
+			'page' => self::VIOLATIONS_SLUG,
+		);
+
+		if ( $site_id > 0 ) {
+			$args['site_id'] = absint( $site_id );
+		}
+
 		return add_query_arg(
-			array(
-				'page' => self::SCAN_JOBS_SLUG,
-			),
+			$args,
+			admin_url( 'admin.php' )
+		);
+	}
+
+	private static function get_single_violation_url( $violation_id, $site_id = 0 ) {
+		$args = array(
+			'page'         => self::VIOLATIONS_SLUG,
+			'acc_view'     => 'violation',
+			'violation_id' => absint( $violation_id ),
+		);
+
+		if ( $site_id > 0 ) {
+			$args['site_id'] = absint( $site_id );
+		}
+
+		return add_query_arg(
+			$args,
+			admin_url( 'admin.php' )
+		);
+	}
+
+	private static function get_scan_detail_url( $scan_id, $site_id = 0 ) {
+		$args = array(
+			'page'     => self::SCAN_JOBS_SLUG,
+			'acc_view' => 'detail',
+			'scan_id'  => absint( $scan_id ),
+		);
+
+		if ( $site_id > 0 ) {
+			$args['site_id'] = absint( $site_id );
+		}
+
+		return add_query_arg(
+			$args,
+			admin_url( 'admin.php' )
+		);
+	}
+
+	private static function get_scan_jobs_page_url( $site_id = 0 ) {
+		$args = array(
+			'page' => self::SCAN_JOBS_SLUG,
+		);
+
+		if ( $site_id > 0 ) {
+			$args['site_id'] = absint( $site_id );
+		}
+
+		return add_query_arg(
+			$args,
 			admin_url( 'admin.php' )
 		);
 	}
@@ -1724,6 +2031,10 @@ class ACC_Admin {
 
 		if ( '' === $base_url ) {
 			return new WP_Error( 'acc_scan_base_url_missing', __( 'A base URL is required before starting a scan.', 'accessibility-scan-manager' ) );
+		}
+
+		if ( empty( $site['is_active'] ) ) {
+			return new WP_Error( 'acc_scan_site_inactive', __( 'This site is inactive.', 'accessibility-scan-manager' ) );
 		}
 
 		if ( 'sitemap' === $scan_mode ) {

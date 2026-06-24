@@ -319,3 +319,17 @@ The scanner already returns normalized page results, while WordPress owns histor
 - `Ignored` issues stay ignored and are not auto-resolved
 - Comparisons only look at earlier scan IDs to avoid older result re-fetches changing newer scan history
 - The UI may derive simple scan state labels (`New`, `Persistent`, `Resolved`) from existing stored fields instead of adding a new database column
+
+---
+
+### 2026-06-24 - Sites as the WordPress admin organizing entity
+**Decision:** Treat `wp_acc_sites` as the top-level admin entity in the WordPress plugin UI. Admins can create, edit, delete, open, scan, and review violations for explicit site records.
+
+**Reason:**
+The product direction now requires site-scoped administration rather than implicitly using the first local site record.
+
+**Implications:**
+- Site configuration such as name, base URL, sitemap URL, and active status lives on each site record
+- Scan initiation, scan history, scan detail, violation summaries, grouped details, and violation occurrence edits carry an explicit `site_id`
+- Existing scanner client and scan orchestration boundaries remain unchanged
+- Deleting a site also deletes its locally stored scans, scan URLs, and violations

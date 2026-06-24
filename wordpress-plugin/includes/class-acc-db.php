@@ -150,6 +150,118 @@ class ACC_DB {
 		return $wpdb->get_results( $sql, ARRAY_A );
 	}
 
+	public static function list_sites_with_summary() {
+		global $wpdb;
+
+		$tables = self::table_names();
+
+		return $wpdb->get_results(
+			"SELECT
+				sites.*,
+				COUNT(DISTINCT scans.id) AS scan_count,
+				COUNT(DISTINCT scan_urls.id) AS url_count,
+				COUNT(DISTINCT violations.id) AS violation_count,
+				MAX(scans.started_at) AS last_scan_at
+			FROM {$tables['sites']} sites
+			LEFT JOIN {$tables['scans']} scans
+				ON scans.site_id = sites.id
+			LEFT JOIN {$tables['scan_urls']} scan_urls
+				ON scan_urls.scan_id = scans.id
+			LEFT JOIN {$tables['violations']} violations
+				ON violations.scan_url_id = scan_urls.id
+			GROUP BY sites.id, sites.name, sites.base_url, sites.sitemap_url, sites.is_active, sites.created_at, sites.updated_at
+			ORDER BY sites.name ASC, sites.id ASC",
+			ARRAY_A
+		);
+	}
+
+	public static function delete_site( $site_id ) {
+		global $wpdb;
+
+		$tables  = self::table_names();
+		$site_id = (int) $site_id;
+
+		if ( $site_id <= 0 ) {
+			return new WP_Error( 'acc_site_delete_invalid_site', __( 'A valid site is required.', 'accessibility-scan-manager' ) );
+		}
+
+		$transaction_started = false !== $wpdb->query( 'START TRANSACTION' );
+
+		$delete_violations_result = $wpdb->query(
+			$wpdb->prepare(
+				"DELETE FROM {$tables['violations']}
+				WHERE scan_url_id IN (
+					SELECT scan_urls.id
+					FROM {$tables['scan_urls']} scan_urls
+					INNER JOIN {$tables['scans']} scans
+						ON scans.id = scan_urls.scan_id
+					WHERE scans.site_id = %d
+				)",
+				$site_id
+			)
+		);
+
+		if ( false === $delete_violations_result ) {
+			if ( $transaction_started ) {
+				$wpdb->query( 'ROLLBACK' );
+			}
+
+			return new WP_Error( 'acc_site_delete_violations_failed', $wpdb->last_error );
+		}
+
+		$delete_scan_urls_result = $wpdb->query(
+			$wpdb->prepare(
+				"DELETE FROM {$tables['scan_urls']}
+				WHERE scan_id IN (
+					SELECT id FROM {$tables['scans']} WHERE site_id = %d
+				)",
+				$site_id
+			)
+		);
+
+		if ( false === $delete_scan_urls_result ) {
+			if ( $transaction_started ) {
+				$wpdb->query( 'ROLLBACK' );
+			}
+
+			return new WP_Error( 'acc_site_delete_scan_urls_failed', $wpdb->last_error );
+		}
+
+		$delete_scans_result = $wpdb->delete(
+			$tables['scans'],
+			array( 'site_id' => $site_id ),
+			array( '%d' )
+		);
+
+		if ( false === $delete_scans_result ) {
+			if ( $transaction_started ) {
+				$wpdb->query( 'ROLLBACK' );
+			}
+
+			return new WP_Error( 'acc_site_delete_scans_failed', $wpdb->last_error );
+		}
+
+		$delete_site_result = $wpdb->delete(
+			$tables['sites'],
+			array( 'id' => $site_id ),
+			array( '%d' )
+		);
+
+		if ( false === $delete_site_result ) {
+			if ( $transaction_started ) {
+				$wpdb->query( 'ROLLBACK' );
+			}
+
+			return new WP_Error( 'acc_site_delete_failed', $wpdb->last_error );
+		}
+
+		if ( $transaction_started ) {
+			$wpdb->query( 'COMMIT' );
+		}
+
+		return true;
+	}
+
 	public static function get_site_summary( $site_id ) {
 		global $wpdb;
 
